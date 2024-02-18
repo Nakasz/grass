@@ -1,221 +1,167 @@
-import logging
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service as ChromeService
-
-from webdriver_manager.chrome import ChromeDriverManager
-from webdriver_manager.core.os_manager import ChromeType
-
-from selenium.common.exceptions import WebDriverException, NoSuchDriverException
-
-import time
-import os
-from flask import Flask
-import hashlib
-import requests 
-import re
-
-logging.basicConfig(filename='error.log', level=logging.ERROR, format='%(asctime)s - %(message)s')
-
-try:
-    options = webdriver.ChromeOptions()
-    options.add_argument("--headless")
-    driver = webdriver.Chrome(options=options)
-except (WebDriverException, NoSuchDriverException) as e:
-
-    logging.error(f"Failed to start Chrome WebDriver: {e}")
-
-    exit()
-
-extensionId = 'ilehaonighjijnmpnagapkhpcdbhclfg'
-CRX_URL = "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=98.0.4758.102&acceptformat=crx2,crx3&x=id%3D~~~~%26uc&nacl_arch=x86-64"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
-
-try:
-    USER = os.environ['GRASS_USER']
-    PASSW = os.environ['GRASS_PASS']
-except:
-    USER = ''
-    PASSW = ''
-
-try:
-    ALLOW_DEBUG = os.environ['ALLOW_DEBUG']
-    if ALLOW_DEBUG == 'True':
-        ALLOW_DEBUG = True
-    else:
-        ALLOW_DEBUG = False
-except:
-    ALLOW_DEBUG = False
-    
-# are they set?
-if USER == '' or PASSW == '':
-    print('Please set GRASS_USER and GRASS_PASS env variables')
-    exit()
-
-if ALLOW_DEBUG == True:
-    print('Debugging is enabled! This will generate a screenshot and console logs on error!')
-
-
-#https://gist.github.com/ckuethe/fb6d972ecfc590c2f9b8
-def download_extension(extension_id):
-    url = CRX_URL.replace("~~~~", extension_id)
-    headers = {"User-Agent": USER_AGENT}
-    r = requests.get(url, stream=True, headers=headers)
-    with open("grass.crx", "wb") as fd:
-        for chunk in r.iter_content(chunk_size=128):
-            fd.write(chunk)
-    if ALLOW_DEBUG == True:
-        #generate md5 of file
-        md5 = hashlib.md5(open('grass.crx', 'rb').read()).hexdigest()
-        print('Extension MD5: ' + md5)
-
-def generate_error_report(driver):
-    if ALLOW_DEBUG == False:
-        return
-    #grab screenshot
-    driver.save_screenshot('error.png')
-    #grab console logs
-    logs = driver.get_log('browser')
-    with open('error.log', 'w') as f:
-        for log in logs:
-            f.write(str(log))
-            f.write('\n')
-
-    url = 'https://imagebin.ca/upload.php'
-    files = {'file': ('error.png', open('error.png', 'rb'), 'image/png')}
-    response = requests.post(url, files=files)
-    print(response.text)
-    print('Error report generated! Provide the above information to the developer for debugging purposes.')
-
-print('Downloading extension...')
-download_extension(extensionId)
-print('Downloaded! Installing extension and driver manager...')
-
-options = webdriver.ChromeOptions()
-#options.binary_location = '/usr/bin/chromium-browser'
-options.add_argument("--headless=new")
-options.add_argument("--disable-dev-shm-usage")
-options.add_argument('--no-sandbox')
-
-options.add_extension('grass.crx')
-
-print('Installed! Starting...')
-try:
-    driver = webdriver.Chrome(options=options)
-except (WebDriverException, NoSuchDriverException) as e:
-    print('Could not start with Manager! Trying to default to manual path...')
-    try:
-        driver_path = "/usr/bin/chromedriver"
-        service = ChromeService(executable_path=driver_path)
-        driver = webdriver.Chrome(service=service, options=options)
-    except (WebDriverException, NoSuchDriverException) as e:
-        print('Could not start with manual path! Exiting...')
-        exit()
-
-#driver.get('chrome-extension://'+extensionId+'/index.html')
-print('Started! Logging in...')
-driver.get('https://app.getgrass.io/')
-
-sleep = 0
-while True:
-    try:
-        driver.find_element('xpath', '//*[@name="user"]')
-        driver.find_element('xpath', '//*[@name="password"]')
-        driver.find_element('xpath', '//*[@type="submit"]')
-        break
-    except:
-        time.sleep(1)
-        print('Loading login form...')
-        sleep += 1
-        if sleep > 15:
-            print('Could not load login form! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-#find name="user"
-user = driver.find_element('xpath', '//*[@name="user"]')
-passw = driver.find_element('xpath', '//*[@name="password"]')
-submit = driver.find_element('xpath', '//*[@type="submit"]')
-
-#get user from env
-user.send_keys(USER)
-passw.send_keys(PASSW)
-submit.click()
-
-#id="chakra-toast-manager-top-right" is the toast
-
-
-sleep = 0
-while True:
-    try:
-        e = driver.find_element('xpath', '//*[contains(text(), "Dashboard")]')
-        break
-    except:
-        time.sleep(1)
-        print('Logging in...')
-        sleep += 1
-        if sleep > 30:
-            print('Could not login! Double Check your username and password! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-print('Logged in! Waiting for connection...')
-driver.get('chrome-extension://'+extensionId+'/index.html')
-sleep = 0
-while True:
-    try:
-        driver.find_element('xpath', '//*[contains(text(), "Open dashboard")]')
-        break
-    except:
-        time.sleep(1)
-        print('Loading connection...')
-        sleep += 1
-        if sleep > 30:
-            print('Could not load connection! Exiting...')
-            generate_error_report(driver)
-            driver.quit()
-            exit()
-
-print('Connected! Starting API...')
-#flask api
-app = Flask(__name__)
-
-@app.route('/')
-def get():
-    try:
-        network_quality = driver.find_element('xpath', '//*[contains(text(), "Network quality")]').text
-        network_quality = re.findall(r'\d+', network_quality)[0]
-    except:
-        network_quality = False
-        print('Could not get network quality!')
-        generate_error_report(driver)
-
-    try:
-       token = driver.find_element('xpath', '//div[@class="chakra-skeleton css-cdkrf0"]//p[@class="chakra-text css-1av1yud"]')
-       epoch_earnings = token.text
-    except Exception as e:
-       epoch_earnings = False
-       print('Could not get earnings!')
-       generate_error_report(driver)
-    
-    try:
-        #find all chakra-badge
-        badges = driver.find_elements('xpath', '//*[@class="chakra-text css-1vg6q84"]')
-        #find the one with chakra-text that contains either "Connected" or "Disconnected"
-        connected = False
-        for badge in badges:
-            text = badge.text
-            if 'Connected' in text:
-                connected = True
-                break
-    except:
-        connected = False
-        print('Could not get connection status!')
-        generate_error_report(driver)
-
-    return {'connected': connected, 'network_quality': network_quality, 'epoch_earnings': epoch_earnings}
-
-
-app.run(host='0.0.0.0',port=80, debug=False)
-driver.quit()
+from selenium import webdriver #line:1
+from selenium .webdriver .chrome .service import Service as ChromeService #line:2
+from webdriver_manager .chrome import ChromeDriverManager #line:4
+from webdriver_manager .core .os_manager import ChromeType #line:5
+from selenium .common .exceptions import WebDriverException ,NoSuchDriverException #line:7
+import time #line:9
+import requests #line:10
+import os #line:11
+import re #line:12
+import base64 #line:13
+from flask import Flask #line:14
+import hashlib #line:15
+import sys #line:16
+extensionId ='ilehaonighjijnmpnagapkhpcdbhclfg'#line:18
+CRX_URL ="https://clients2.google.com/service/update2/crx?response=redirect&prodversion=98.0.4758.102&acceptformat=crx2,crx3&x=id%3D~~~~%26uc&nacl_arch=x86-64"#line:19
+USER_AGENT ="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"#line:20
+try :#line:22
+    USER =os .environ ['GRASS_USER']#line:23
+    PASSW =os .environ ['GRASS_PASS']#line:24
+except :#line:25
+    USER =''#line:26
+    PASSW =''#line:27
+try :#line:29
+    ALLOW_DEBUG =os .environ ['ALLOW_DEBUG']#line:30
+    if ALLOW_DEBUG =='True':#line:31
+        ALLOW_DEBUG =True #line:32
+    else :#line:33
+        ALLOW_DEBUG =False #line:34
+except :#line:35
+    ALLOW_DEBUG =False #line:36
+if USER ==''or PASSW =='':#line:39
+    print ('Please set GRASS_USER and GRASS_PASS env variables')#line:40
+    exit ()#line:41
+if ALLOW_DEBUG ==True :#line:43
+    print ('Debugging is enabled! This will generate a screenshot and console logs on error!')#line:44
+def download_extension (O00O0O000O0OO0O0O ):#line:48
+    OOO00OOOOO000000O =CRX_URL .replace ("~~~~",O00O0O000O0OO0O0O )#line:49
+    OO00OOOOOO00000O0 ={"User-Agent":USER_AGENT }#line:50
+    O0000OOOOOOO00O00 =requests .get (OOO00OOOOO000000O ,stream =True ,headers =OO00OOOOOO00000O0 )#line:51
+    with open ("grass.crx","wb")as OOOO0OOO0O0000O00 :#line:52
+        for OO000OOO0O0OO00O0 in O0000OOOOOOO00O00 .iter_content (chunk_size =128 ):#line:53
+            OOOO0OOO0O0000O00 .write (OO000OOO0O0OO00O0 )#line:54
+    if ALLOW_DEBUG ==True :#line:55
+        OO0OO00OO0OOOOOOO =hashlib .md5 (open ('grass.crx','rb').read ()).hexdigest ()#line:57
+        print ('Extension MD5: '+OO0OO00OO0OOOOOOO )#line:58
+def generate_error_report (O0O000000OOOOOOO0 ):#line:62
+    if ALLOW_DEBUG ==False :#line:63
+        return #line:64
+    O0O000000OOOOOOO0 .save_screenshot ('error.png')#line:66
+    O0OO00OOOO0O000O0 =O0O000000OOOOOOO0 .get_log ('browser')#line:68
+    with open ('error.log','w')as OO00OOO000OO0O0O0 :#line:69
+        for O00OOO0O0O00OO00O in O0OO00OOOO0O000O0 :#line:70
+            OO00OOO000OO0O0O0 .write (str (O00OOO0O0O00OO00O ))#line:71
+            OO00OOO000OO0O0O0 .write ('\n')#line:72
+    OOOO00O0O0OO0O000 ='https://imagebin.ca/upload.php'#line:74
+    O0O0O0OOOOO0O0OOO ={'file':('error.png',open ('error.png','rb'),'image/png')}#line:75
+    O0OO0O00OOOOO0O00 =requests .post (OOOO00O0O0OO0O000 ,files =O0O0O0OOOOO0O0OOO )#line:76
+    print (O0OO0O00OOOOO0O00 .text )#line:77
+    print ('Error report generated! Provide the above information to the developer for debugging purposes.')#line:78
+print ('Downloading extension...')#line:80
+download_extension (extensionId )#line:81
+print ('Downloaded! Installing extension and driver manager...')#line:82
+options =webdriver .ChromeOptions ()#line:84
+options .add_argument ("--headless=new")#line:86
+options .add_argument ("--disable-dev-shm-usage")#line:87
+options .add_argument ('--no-sandbox')#line:88
+options .add_extension ('grass.crx')#line:90
+print ('Installed! Starting...')#line:92
+try :#line:93
+    driver =webdriver .Chrome (options =options )#line:94
+except (WebDriverException ,NoSuchDriverException )as e :#line:95
+    print ('Could not start with Manager! Trying to default to manual path...')#line:96
+    try :#line:97
+        driver_path ="/usr/bin/chromedriver"#line:98
+        service =ChromeService (executable_path =driver_path )#line:99
+        driver =webdriver .Chrome (service =service ,options =options )#line:100
+    except (WebDriverException ,NoSuchDriverException )as e :#line:101
+        print ('Could not start with manual path! Exiting...')#line:102
+        exit ()#line:103
+print ('Started! Logging in...')#line:106
+driver .get ('https://app.getgrass.io/')#line:107
+sleep =0 #line:109
+while True :#line:110
+    try :#line:111
+        driver .find_element ('xpath','//*[@name="user"]')#line:112
+        driver .find_element ('xpath','//*[@name="password"]')#line:113
+        driver .find_element ('xpath','//*[@type="submit"]')#line:114
+        break #line:115
+    except :#line:116
+        time .sleep (1 )#line:117
+        print ('Loading login form...')#line:118
+        sleep +=1 #line:119
+        if sleep >15 :#line:120
+            print ('Could not load login form! Exiting...')#line:121
+            generate_error_report (driver )#line:122
+            driver .quit ()#line:123
+            exit ()#line:124
+user =driver .find_element ('xpath','//*[@name="user"]')#line:127
+passw =driver .find_element ('xpath','//*[@name="password"]')#line:128
+submit =driver .find_element ('xpath','//*[@type="submit"]')#line:129
+user .send_keys (USER )#line:132
+passw .send_keys (PASSW )#line:133
+submit .click ()#line:134
+sleep =0 #line:139
+while True :#line:140
+    try :#line:141
+        e =driver .find_element ('xpath','//*[contains(text(), "Dashboard")]')#line:142
+        break #line:143
+    except :#line:144
+        time .sleep (1 )#line:145
+        print ('Logging in...')#line:146
+        sleep +=1 #line:147
+        if sleep >30 :#line:148
+            print ('Could not login! Double Check your username and password! Exiting...')#line:149
+            generate_error_report (driver )#line:150
+            driver .quit ()#line:151
+            exit ()#line:152
+print ('Logged in! Waiting for connection...')#line:154
+driver .get ('chrome-extension://'+extensionId +'/index.html')#line:155
+sleep =0 #line:156
+while True :#line:157
+    try :#line:158
+        driver .find_element ('xpath','//*[contains(text(), "Open dashboard")]')#line:159
+        break #line:160
+    except :#line:161
+        time .sleep (1 )#line:162
+        print ('Loading connection...')#line:163
+        sleep +=1 #line:164
+        if sleep >30 :#line:165
+            print ('Could not load connection! Exiting...')#line:166
+            generate_error_report (driver )#line:167
+            driver .quit ()#line:168
+            exit ()#line:169
+print ('Connected! Starting API...')#line:171
+app =Flask (__name__ )#line:173
+@app .route ('/')#line:175
+def get ():#line:176
+    try :#line:177
+        OOOOOO00OOOOO00OO =driver .find_element ('xpath','//*[contains(text(), "Network quality")]').text #line:178
+        OOOOOO00OOOOO00OO =re .findall (r'\d+',OOOOOO00OOOOO00OO )[0 ]#line:179
+    except :#line:180
+        OOOOOO00OOOOO00OO =False #line:181
+        print ('Could not get network quality!')#line:182
+        generate_error_report (driver )#line:183
+    try :#line:185
+        O0O00OO0O0OO0O00O =driver .find_element ('xpath','//*[@alt="token"]')#line:186
+        O0O00OO0O0OO0O00O =O0O00OO0O0OO0O00O .find_element ('xpath','following-sibling::div')#line:187
+        O00OOO0OO0OOOO00O =O0O00OO0O0OO0O00O .text #line:188
+    except Exception as OOOO0O0000O00OOOO :#line:189
+        O00OOO0OO0OOOO00O =False #line:190
+        print ('Could not get earnings!')#line:191
+        generate_error_report (driver )#line:192
+    try :#line:194
+        OO0000OOO0OO0O000 =driver .find_elements ('xpath','//*[@class="chakra-badge"]')#line:196
+        OO000OOOOO0000O00 =False #line:198
+        for O0OO0O0O0OO00OO00 in OO0000OOO0OO0O000 :#line:199
+            OOO00O0OO00OOOO0O =O0OO0O0O0OO00OO00 .find_element_by_xpath ('child::div').text #line:200
+            if 'Connected'in OOO00O0OO00OOOO0O :#line:201
+                OO000OOOOO0000O00 =True #line:202
+                break #line:203
+    except :#line:204
+        OO000OOOOO0000O00 =False #line:205
+        print ('Could not get connection status!')#line:206
+        generate_error_report (driver )#line:207
+    return {'connected':OO000OOOOO0000O00 ,'network_quality':OOOOOO00OOOOO00OO ,'epoch_earnings':O00OOO0OO0OOOO00O }#line:209
+app .run (host ='0.0.0.0',port =80 ,debug =False )#line:212
+driver .quit ()
